@@ -784,7 +784,7 @@ declare module 'claude-code' {
        */
       maxTurns?: number;
       /**
-       * Token count, 100000 to 1000000, at which the agent compacts its own
+       * Token count, at least 100000, at which the agent compacts its own
        * conversation as a subagent. It only lowers the window the agent would
        * otherwise get.
        */
@@ -9022,6 +9022,85 @@ declare module 'claude-code' {
   };
 
   /**
+   * The network hosts a plugin's files and source name, and the parts that could
+   * reach others: drawn from `provides` and `uses`, with nothing dialed or run.
+   *
+   * It only shows: it allows no host, and no call is held to it. Not in either
+   * list: where a host redirects or sends a sign-in; a server's `headersHelper`;
+   * a command in the plugin's settings; what the module's hook on any event but
+   * `process.run`, `process.spawn`, `http.fetch` and `audio.play` rewrites or
+   * answers (a tool call, a command's arguments, an agent, the settings); what
+   * the plugin has a server, the model, another session or another plugin do
+   * (`$.mcp`, `$.model`, `$.agent.spawn`, a prompt, an agent, a workflow, a hook
+   * of another type); what follows from a file, variable or setting it writes,
+   * or a link it draws; and what the engine itself runs or dials to serve a call
+   * (speech, a notification, telemetry).
+   */
+  export type PluginHosts = {
+      /**
+       * One row a host, sorted, with every place that names it.
+       */
+      named: readonly {
+          /**
+           * As `sandbox.network.allowedDomains` spells an entry: lowercase ASCII,
+           * IPv6 in brackets, and `:port` unless it is the scheme's default. A name
+           * with no dot is listed too, though that setting takes only `localhost`.
+           */
+          host: string;
+          sources: readonly PluginHostSource[];
+      }[];
+      /**
+       * The parts whose reach is not read. More reasons may be added.
+       */
+      unread: readonly {
+          kind: keyof PluginProvides;
+          /**
+           * The part's name in `provides`: a hook's event, a module's path. Absent
+           * where the whole kind is meant.
+           */
+          name?: string;
+          /**
+           * `process`: it is, or can start, a program (a stdio server, a bundle's
+           * server, an LSP server, a command hook, a monitor, a file of `bin/`, a
+           * skill, a command, a module that calls or hooks `process.run` or
+           * `process.spawn`, or calls `$.tool.call`, `$.agent.call`, `$.command.run`
+           * or `$.agent.register`).
+           * `url`: its URL does not settle where it goes, as it spells out no host,
+           * is computed, or goes or may go over a `socketPath`; or the module hooks
+           * `http.fetch` or `audio.play`, where it can send a request elsewhere.
+           * `unlisted`: the kind's list may be short, or the module was not scanned.
+           */
+          reason: 'process' | 'url' | 'unlisted';
+      }[];
+  };
+
+  /**
+   * Where a host in PluginHosts came from, named as `provides` names the part.
+   * More types may be added, so a reader leaves room for one it does not know.
+   */
+  export type PluginHostSource = {
+      /**
+       * A remote MCP server (`http`, `sse`, `ws`), or a bundle (`mcpb`) given
+       * by the URL it is downloaded from.
+       */
+      type: 'mcp';
+      name: string;
+  } | {
+      /**
+       * An HTTP hook.
+       */
+      type: 'hook';
+      event: string;
+      matcher?: string;
+  } | {
+      /**
+       * The hooks module (PluginRegisterUses `hosts`).
+       */
+      type: 'module';
+      path: string;
+  };
+
+  /**
    * The nouns a plugin declared on `$` by merging into EngineInterface; never
    * one the engine's own events are under (`tool`, `session`, `ui`).
    *
@@ -9141,9 +9220,10 @@ declare module 'claude-code' {
    * styles, themes, monitors, settings and `bin/`. None of them starts before the
    * verdict. To keep out less, pass `provides` on with entries removed.
    *
-   * `tier`, `uses`, `provides` and `unread` are the host's reading of the plugin, what
-   * a gate holds it to; `name`, `root`, `version` and `provenance` are its own word (its
-   * manifest, its place), so a rule keyed on them is one a rename walks past.
+   * `tier`, `uses`, `provides`, `unread`, `hosts` and `requiredByOrganization` are the
+   * host's reading of the plugin, what a gate holds it to; `name`, `root`, `version` and
+   * `provenance` are its own word (its manifest, its place), so a rule keyed on
+   * them is one a rename walks past.
    */
   export type PluginRegisterInput = {
       /**
@@ -9151,13 +9231,15 @@ declare module 'claude-code' {
        */
       name: string;
       /**
-       * Where its hooks would stand among the chain's tiers (Tier); never
-       * `core`, the engine's own.
+       * The tier it is judged in (Tier), which for a hooks module is where its hooks
+       * would stand in the chain; never `core`, the engine's own.
        */
       tier: Exclude<Tier, 'core'>;
       /**
        * The plugin's directory (the one holding `.claude-plugin/plugin.json`),
-       * absolute.
+       * absolute; `builtin` for a bundled one. In a hosted cloud session (SessionInfo
+       * `isHosted`), an installed plugin with no hooks module has its `provenance`
+       * here, and one whose module did not load may.
        */
       root: string;
       /**
@@ -9169,6 +9251,14 @@ declare module 'claude-code' {
        * installed, `<name>@inline` by `--plugin-dir`, `<name>@builtin` bundled.
        */
       provenance: string;
+      /**
+       * True where the app that started this session handed over this plugin by path
+       * and said its organization requires or auto-installs it, or, in a hosted cloud
+       * session (SessionInfo `isHosted`), where claude.ai lists it as required; else absent.
+       * It gives no permission, and sets `tier` only for a plugin with no hooks
+       * module to load (Tier). Left out, it is restored.
+       */
+      requiredByOrganization?: true;
       /**
        * What its hooks module hooks and calls, as scanned (PluginRegisterUses).
        * Empty for a plugin with no module, or whose module did not load, and for a
@@ -9204,6 +9294,15 @@ declare module 'claude-code' {
        * e.unread.includes('bin') ? { refuse: 'bin/ could not be listed' } : next(e)
        */
       unread: readonly (keyof PluginProvides)[];
+      /**
+       * The network hosts it names and the parts that could reach others
+       * (PluginHosts), of the whole plugin: narrowing `provides` leaves it as it
+       * is. Left out, it is restored.
+       *
+       * @example
+       * e.hosts.named.some(row => !known.has(row.host)) ? { refuse: 'new host' } : next(e)
+       */
+      hosts: PluginHosts;
   };
 
   /**
@@ -9235,7 +9334,8 @@ declare module 'claude-code' {
    * the same lists `claude plugin validate` prints and the host's rule reads.
    *
    * Exact, since a module that spells `on`, `$`, `$.env` or a `$.state`
-   * reference other than literally does not load.
+   * reference other than literally does not load. `hosts` alone is not: a URL
+   * may be computed, and it says where one is.
    */
   export type PluginRegisterUses = {
       /**
@@ -9275,6 +9375,26 @@ declare module 'claude-code' {
            * The values its `$.state.set` calls spell, sorted, each once.
            */
           writes: readonly StateName[];
+      };
+      /**
+       * The hosts its `$.http.fetch` and `$.audio.play({ url })` calls name, as far
+       * as the source spells them; absent when it calls neither. No call is held
+       * to the list, and where a host redirects is not known.
+       */
+      hosts?: {
+          /**
+           * Spelled as PluginHosts spells a host, sorted, each once: read off a string
+           * literal, a template that spells the host out, or a `const` of the same
+           * file holding one, there or in a template's `${}`. A fetch whose options,
+           * written at the call, give a `socketPath` dials no host and names none.
+           */
+          named: readonly string[];
+          /**
+           * Which of `audio.play` and `http.fetch` it calls with any other URL, one
+           * over 2,048 characters, or options that give or may give a `socketPath`,
+           * sorted: it loads all the same, and may reach what is not in `named`.
+           */
+          unread: readonly string[];
       };
   };
 
@@ -9621,6 +9741,11 @@ declare module 'claude-code' {
        * with errors, or one with a hooks or server file left unread. A report from an older CLI leaves it out.
        */
       provides: PluginProvides | null;
+      /**
+       * What `plugin.register` carries as `e.hosts` for an installed copy of the
+       * folder. Null wherever `provides` is. A report from an older CLI leaves it out.
+       */
+      hosts: PluginHosts | null;
       /**
        * What the validator advises without counting it under any flag: today, the
        * install line a plugin's README lacks.
@@ -16296,22 +16421,23 @@ declare module 'claude-code' {
    * One of the chain's five tiers (TIERS), outermost first; on every
    * `next.trace` entry, and what `next.to(e, tier)` names.
    *
-   * `prepend` and `append` are the managed plugins an administrator lists. With
+   * `prepend` and `append` are the plugins an administrator manages. With
    * no managed settings, they are a person's own plugins listed in user settings,
    * except where plugin-authoring's reference says that list is set aside. `user`
    * is every other plugin a person installs, `builtin` the plugins bundled in the
    * binary, `core` the engine's innermost link. `--safe-mode` and `--bare` keep
    * an organization's tiers: they turn off what a person installed.
    *
-   * Under an organization's managed settings, a mod from a marketplace with a
+   * Under an organization's managed settings, a plugin from a marketplace with a
    * remote source (`github`, `git`, `url` or inline `settings`) takes the
-   * organization's tier when those settings do three things: set it true in
-   * `enabledPlugins`, declare that marketplace in `extraKnownMarketplaces`, and
-   * list it in `prependPlugins` or `appendPlugins`. Missing any of the three, it
-   * stays in `user`. A marketplace's `pluginDigests` is deprecated and ignored, so
+   * organization's tier, with a hooks module or without, when those settings set
+   * it true in `enabledPlugins` and declare that marketplace in
+   * `extraKnownMarketplaces`. Missing either, it stays in `user`. `prependPlugins`
+   * and `appendPlugins` set the order: in neither, it is `prepend`, after the
+   * listed ones. A marketplace's `pluginDigests` is deprecated and ignored, so
    * a new release reaches machines with no settings change.
    *
-   * Claude Code stores a hash (`copyHash`) on a listed mod's install record when it
+   * Claude Code stores a hash (`copyHash`) on such a plugin's install record when it
    * writes a copy from the marketplace's declared origin that fits this build, and
    * checks the copy against it at each load, so an edit made after that is caught.
    * A copy that doesn't match is fetched afresh once before the first turn. Some
@@ -16322,6 +16448,24 @@ declare module 'claude-code' {
    * says `listed mod <id> does not run in this session: <why>`. A copy that doesn't
    * match runs without its hooks module, and a copy outside its
    * `engines["claude-code"]` range is off whole.
+   *
+   * That is a listed mod's road. An unlisted plugin's version moves only by an
+   * update, and no start waits on a fetch for it: with no hash yet, or a copy that
+   * doesn't match, it runs in `user`, module included. Behind the start, the commit
+   * its record names is fetched and compared with its folder. The same files earn
+   * the hash, and the tier at the next start or reload. A folder that differs (an
+   * edit, a file the plugin wrote there) is never repaired: it stays in `user` until
+   * an update or a reinstall. So does one whose record names no commit, or one its
+   * marketplace's `ref` does not hold, or that comes from a repository of its own.
+   * A fetch that fails is tried again a day later, and so is a folder that changed
+   * and still differs. A one-shot `-p` run and essential-traffic mode fetch nothing.
+   * Ahead of every check, the `__pycache__` folders in a cached copy are removed.
+   *
+   * A plugin `plugin.register` marks `requiredByOrganization` is judged there in the
+   * organization's tier when it has no hooks module and is shown to be outside every
+   * dev-mods folder and what a link in one leads to (a zip by where it is unpacked).
+   * Nothing proves that mark, so it goes no further: it moves neither a module's
+   * tier nor the tier an event's `provider` reads.
    */
   export type Tier = (typeof TIERS)[number];
 
@@ -16403,8 +16547,12 @@ declare module 'claude-code' {
    * of which the tool sees (the engine strips them before the tool runs).
    *
    * `consent` is the person's own words for the press that raised the call
-   * (`The user pressed "1: Yes" on ...`): the run's context carries it as a human
-   * turn, which the permission path reads as the user's request.
+   * (`The user pressed "1: Yes" on ...`). It joins the run's context as a human
+   * turn, which the permission path reads as the user's request, only when the
+   * call answers the person's press, input or pick on this plugin's own element
+   * (not one in a desktop `Client`): made by that element's closure, or by this
+   * plugin's hook on that event, before it returns or times out, with no Stop
+   * standing since the gesture. Any other call runs as it would without `consent`.
    */
   export type ToolCallReserved<T> = {
       tool: T;
