@@ -14,6 +14,7 @@ import HeldVerdict from './held-verdict'
 import HotReloadPrompt from './hot-reload-prompt'
 import { identityRefusal } from './identity-refusal'
 import { managedModsOnlyRefusal } from './managed-mods-only-refusal'
+import { isOrganizationsHookCall } from './organizations-hook-call'
 import { pastUsers } from './past-users'
 import { pinnedVariableRefusal } from './pinned-variable-refusal'
 import Policy from './policy'
@@ -88,6 +89,8 @@ export function register(on: On) {
 
   on('settings.read', ($, e, next) => next.to(e, 'append'))
 
+  on('telemetry.log', { to: 'collector' }, ($, e, next) => next.to(e, 'append'))
+
   // It refuses, so it is never skipped when alone. No call on `$` here: a hook
   // that call reached would run with this one left out.
   on('session.identity', ($, e, next) =>
@@ -100,14 +103,25 @@ export function register(on: On) {
       : next.to(e, 'append'),
   )
 
-  // The tool.describe and command.describe rows, like the agent.offer, prompt.section,
-  // attribution.text and env.get rows, only pass the event on. The engine skips them where this
-  // plugin is the copy built into it and no other plugin hooks the event. Before one does more,
-  // take its event off that skip list: a test in the engine's repository fails and says where.
+  // The tool.describe and command.describe rows, like the tool.offer, agent.offer, agent.report,
+  // prompt.section, attribution.text and env.get rows, only pass the event on. The engine skips them
+  // where this plugin is the copy built into it and no other plugin hooks the event. Before one does
+  // more, take its event off that skip list: a test in the engine's repository fails and says where.
   on('tool.describe', ($, e, next) => pastUsers(e, next))
   on('command.describe', ($, e, next) => pastUsers(e, next))
   on('agent.offer', ($, e, next) => pastUsers(e, next))
   on('agent.spawn', ($, e, next) => pastUsers(e, next))
+  on('agent.report', ($, e, next) => pastUsers(e, next))
+
+  // By name too, as tool.list holds them: policy names tools the engine leaves in the user tier.
+  on('tool.offer', async ($, e, next) => {
+    const isOrgs = await Policy.decidedByPolicy(
+      readPolicy(() => $.settings.read(Policy.SOURCE)),
+      policy => Policy.isOrgTool(policy, e.tool),
+    )
+
+    return isOrgs ? next.to(e, 'append') : pastUsers(e, next)
+  }).catch(($, e, next) => (next.called ? next(e) : next.to(e, 'append')))
 
   on('tool.register', async ($, e, next) => {
     const isOrgs =
@@ -297,8 +311,9 @@ export function register(on: On) {
 
     if (id === undefined) {
       if (
-        next.origin.tier === 'prepend' &&
-        next.origin.plugin === $.plugin.name
+        isOrganizationsHookCall(next.origin) ||
+        (next.origin.tier === 'prepend' &&
+          next.origin.plugin === $.plugin.name)
       ) {
         return next.to(e, 'append')
       }
@@ -340,6 +355,10 @@ export function register(on: On) {
 
     return held
   }).catch(async ($, e, next) => {
+    if (isOrganizationsHookCall(next.origin)) {
+      return next.to(e, 'append')
+    }
+
     const last = await next(e).catch(() => undefined)
 
     const shouldVouch = await Policy.decidedByPolicy(
