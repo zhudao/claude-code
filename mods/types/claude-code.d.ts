@@ -1240,7 +1240,8 @@ declare module 'claude-code' {
   export type BoxHoverProps = {
       /**
        * Names a hover group of this plugin's: every element it draws with the
-       * same `scope`, in any site, lights while any is hovered, reveals included.
+       * same `scope`, in any site but a `Backdrop`, lights while any is hovered,
+       * reveals included.
        *
        * A Pane row and a mark on a transcript message can share one. Another
        * plugin's elements under the same string are a different group. One to
@@ -3356,8 +3357,10 @@ declare module 'claude-code' {
            */
           id: () => Promise<string>;
           /**
-           * Returns the git repository the session runs in, read from the working
-           * copy on each call; null when the directory is not inside one.
+           * Returns the repository the session runs in; null when the directory is
+           * not inside one.
+           *
+           * Its root and remote are `vcs.detect`'s: hook that to change them.
            *
            * @example
            * const repo = await $.session.repo(); const publicRepo = !repo?.internal
@@ -4429,6 +4432,39 @@ declare module 'claude-code' {
           set: (name: string, value: string | undefined) => Promise<EnvSetResult>;
       };
       /**
+       * Version control, whichever system keeps the folder.
+       *
+       * Experimental: may change.
+       */
+      vcs: {
+          /**
+           * Returns the working copy a folder is in, the event `vcs.detect`; null
+           * when it is in none.
+           *
+           * Experimental: may change.
+           *
+           * Asked anew at each call, through the other hooks, the calling one
+           * skipped. A relative `path` is under the working directory. Rejects
+           * where the session's files are on another machine.
+           *
+           * @example
+           * const copy = await $.vcs.detect({ path: "." }); const at = copy?.revision
+           */
+          detect: EventCalls['vcs']['detect'];
+          /**
+           * Returns what changed in a working copy, the event `vcs.diff`; `unknown`
+           * where no hook can say.
+           *
+           * Experimental: may change.
+           *
+           * Takes a folder. Asked anew at each call, and refused where `detect` is.
+           *
+           * @example
+           * const { files } = await $.vcs.diff({ path: ".", vcs: "acme", base: "head" })
+           */
+          diff: EventCalls['vcs']['diff'];
+      };
+      /**
        * WebAssembly, run in the module's own environment, where its hooks run.
        *
        * A module that calls `compile` has a `WebAssembly` global, the standard API
@@ -5380,6 +5416,95 @@ declare module 'claude-code' {
        */
       'attribution.text': AttributionTextInput;
       /**
+       * Fires when the engine asks which version control system a folder uses;
+       * `next(e)` resolves to the working copy (VcsWorkingCopy) or null.
+       *
+       * Experimental: may change.
+       *
+       * Asked for a conversation's first request, after a compaction and when the
+       * loop's own folder changes. Core answers Git. Copies nest: answer where
+       * yours is as near as the one beneath or nearer, else return that one.
+       *
+       * `detect` of the `root` it answered names the same `root`.
+       *
+       * Every copy of one repository answers the same `mainRoot`.
+       *
+       * Hooks written so resolve nested copies nearest first, in any load order.
+       *
+       * `$.vcs.detect` takes any file's path; a hook hears the folder holding it.
+       *
+       * The parent of `root` gives the enclosing system, the calling hook skipped.
+       *
+       * On a managed login a person's hook is asked only where nothing else claims the folder.
+       *
+       * Another system's answer names it and its branch in the environment block
+       * and drops the Git status block and, for the session, the shell tools'
+       * commit and pull-request steps; Git's safety cautions stay. Add your own
+       * with `prompt.context` and `tool.describe`. `$.session.repo()` reads it
+       * too. Trust, settings, memory, permissions and the sandbox never do. A
+       * hook that fails passes it through. Not raised where the session's files
+       * are on another machine.
+       *
+       * Grep and file suggestions honor `.ignore` and `.rgignore` without Git.
+       *
+       * @example
+       * on("vcs.detect", async ($, e, next) => {
+       *   const below = await next(e)
+       *   const found = await $.process.run(["acme", "root"], { cwd: e.path })
+       *   const root = found.stdout.trim()
+       *   const isAsNearOrNearer = root.length >= (below?.root.length ?? 0)
+       *   if (found.exitCode !== 0 || !isAsNearOrNearer) return below
+       *   return {
+       *     vcs: "acme", root, mainRoot: root, revision: "1234", branch: null,
+       *     defaultBranch: null, remote: "ssl:acme:1666",
+       *   }
+       * })
+       * on("prompt.context", async ($, e, next) => {
+       *   const result = await next(e)
+       *   const copy = await $.vcs.detect({ path: "." })
+       *   const block = { name: "acmeStatus", text: `At change ${copy?.revision}.` }
+       *   return copy?.vcs === "acme"
+       *     ? { ...result, blocks: [...result.blocks, block] }
+       *     : result
+       * })
+       */
+      'vcs.detect': VcsDetectInput;
+      /**
+       * Fires when a mod asks what changed in a working copy, as `/diff` does
+       * where `vcs.detect` names a system other than Git; match it on `vcs`.
+       *
+       * Experimental: may change.
+       *
+       * Core answers `{ unknown: null }`, and `/diff` then looks for Git; a hook's
+       * own reason shows instead. An answer may cost a server call. A hook that
+       * fails passes it through. Not raised where the session's files are on
+       * another machine.
+       *
+       * Git isn't served here yet: `/diff` reads it itself.
+       *
+       * On a managed login a person's hook is asked only where no other answers.
+       *
+       * A diff over two sets of paths is the union of each.
+       *
+       * Stat-only is the same files without patches.
+       *
+       * @example
+       * on("vcs.diff", { vcs: "acme" }, async ($, e) => {
+       *   if (e.base === "default") return { unknown: "acme has no mainline" }
+       *   const kept = e.paths?.map(path => `--only=${path}`) ?? ["--all"]
+       *   const argv = ["acme", "changes", "--json", ...kept]
+       *   const found = await $.process.run(argv, { cwd: e.path })
+       *   if (found.exitCode !== 0) return { unknown: "acme did not answer" }
+       *   const files = JSON.parse(found.stdout).map(one => ({
+       *     path: one.path, renamedFrom: null, added: one.plus, removed: one.minus,
+       *     isBinary: false, isUntracked: one.isNew,
+       *     ...(!e.isStatOnly && { patch: one.hunks }),
+       *   }))
+       *   return { base: "change 1234", files }
+       * })
+       */
+      'vcs.diff': VcsDiffInput;
+      /**
        * Fires once per process for each loaded plugin, before the first prompt,
        * then once per fresh load of one (never `/clear`); `next(e)` is `{ cwd }`.
        *
@@ -5753,6 +5878,14 @@ declare module 'claude-code' {
        */
       'attribution.text': AttributionTextResult;
       /**
+       * The working copy the folder is in, or null.
+       */
+      'vcs.detect': VcsDetectResult;
+      /**
+       * `{ base, files }`, or `{ unknown }` with the reason, null from core.
+       */
+      'vcs.diff': VcsDiffResult;
+      /**
        * `{ cwd }`.
        */
       'session.start': SessionStartResult;
@@ -5876,6 +6009,10 @@ declare module 'claude-code' {
       };
       attribution: {
           text: (input: AttributionTextInput) => Promise<AttributionTextResult>;
+      };
+      vcs: {
+          detect: (input: VcsDetectInput) => Promise<VcsDetectResult>;
+          diff: (input: VcsDiffInput) => Promise<VcsDiffResult>;
       };
       agent: {
           offer: (input: AgentOfferInput) => Promise<AgentOfferResult>;
@@ -11172,20 +11309,21 @@ declare module 'claude-code' {
    */
   export type PromptFilled = {
       /**
-       * True once the box holds the text; false where no box could take it or a
-       * hook kept it out (PromptFillResult).
+       * True once the box holds the text; false where no box could take it, a
+       * hook kept it out or no app answered (PromptFillResult).
        */
       isFilled: boolean;
       /**
        * Why the box did not take the text, when the engine itself refused
        * (PromptFillResult): `no_composer` where the session binds no box,
-       * `dialog` while one holds the keys. A hook's refusal carries none, so
-       * a caller choosing a fallback treats an absent cause as unknown and
-       * does not act as if no box existed.
+       * `dialog` while one holds the keys, `unanswered` where an app was asked
+       * and none answered, so the text may have landed. A hook's refusal carries
+       * none, so a caller choosing a fallback treats an absent cause as unknown
+       * and does not act as if no box existed.
        */
-      refusal?: 'no_composer' | 'dialog';
+      refusal?: 'no_composer' | 'dialog' | 'unanswered';
       /**
-       * The draft after the fill; unchanged when `isFilled` is false; `''` where
+       * The draft after the fill; unchanged when the fill was refused; `''` where
        * no box is drawn or the caller may not read it (see above).
        */
       text: string;
@@ -11283,24 +11421,25 @@ declare module 'claude-code' {
   export type PromptFillResult = {
       /**
        * True once the box holds the text; false where no box can take it (a
-       * dialog holds the keys, a headless session has none).
+       * dialog holds the keys, a headless session has none) or no app answered.
        *
        * A hook answering `{ isFilled: false }` without `next` keeps the text
        * out.
        */
       isFilled: boolean;
       /**
-       * Why the box did not take the text, on the two refusals the engine
-       * itself answers: the session binds no prompt box (`no_composer`:
-       * headless, or a surface that draws its own composer), or a dialog holds
-       * the keys (`dialog`), so the write would land under it, unseen. A hook's
-       * own refusal carries none: the site strips a cause a hook writes itself,
-       * keeping only one its `next` gave it, passed up as it was. A caller
+       * Why `isFilled` is false, on the three causes the engine itself
+       * answers: the session binds no prompt box (`no_composer`: headless, or a
+       * surface that draws its own composer), a dialog holds the keys
+       * (`dialog`), so the write would land under it, unseen, or an app was
+       * asked and none answered (`unanswered`), so the text may have landed. A
+       * hook's own refusal carries none: the site strips a cause a hook writes
+       * itself, keeping only one its `next` gave it, passed up as it was. A caller
        * branching on the cause treats an absent one as unknown and takes its
        * refusing arm; `no_composer` is the only value that says no box exists
        * to protect.
        */
-      refusal?: 'no_composer' | 'dialog';
+      refusal?: 'no_composer' | 'dialog' | 'unanswered';
   };
 
   /**
@@ -13106,7 +13245,7 @@ declare module 'claude-code' {
        * click, ctrl+x tab): an Input types, a Button arms the hotkeys, a tree
        * taller than it scrolls.
        *
-       * Raised on the terminal, desktop and mobile surfaces only.
+       * Raised on every attached surface.
        */
       AbovePrompt: {
           /**
@@ -13176,7 +13315,7 @@ declare module 'claude-code' {
        * either is told as `ui.render (AbovePromptList) refused:`, whatever that
        * line's ending says.
        *
-       * Raised on the terminal, desktop and mobile surfaces only.
+       * Raised on every attached surface.
        */
       AbovePromptList: {
           /**
@@ -14908,16 +15047,17 @@ declare module 'claude-code' {
 
   /**
    * What `$.session.repo()` answers: the repository's root and its origin remote,
-   * when the session is in one.
+   * when the session is in one. A `vcs.detect` hook changes those two.
    */
   export type SessionRepo = {
       /**
-       * The repository's root, absolute: the main working tree's for a worktree.
+       * The repository's root, absolute: the main working tree's for a worktree
+       * (`vcs.detect`'s `mainRoot`, else its `root`).
        */
       root: string;
       /**
        * The `origin` remote's URL as git has it (push URL preferred), or null when
-       * the repository has none.
+       * the repository has none. Another system's may be no URL.
        */
       remote: string | null;
       /**
@@ -16289,7 +16429,7 @@ declare module 'claude-code' {
   export type TextHoverProps = {
       /**
        * Names a hover group of this plugin's: every element it draws with the
-       * same `scope`, in any site on the surface, lights while any is hovered.
+       * same `scope`, in any site but a `Backdrop`, lights while any is hovered.
        *
        * Another plugin's elements under the same string are a different group.
        * One to 64 characters, no control characters; no keyed Box needed. On the
@@ -16440,7 +16580,7 @@ declare module 'claude-code' {
   interface ThemeBoxRule {
       /**
        * The flat color behind the words. Give it beside a `fill` too: it tells the
-       * app what the words sit on.
+       * app what the words sit on, and a sliced drawing can get it under its words.
        */
       backgroundColor?: ThemeStyleColor;
       fill?: ThemeFill;
@@ -16456,6 +16596,7 @@ declare module 'claude-code' {
       borderWidth?: number;
       /**
        * `x` and `y` from -16 to 16, and `blur` from 0 to 32. Each is 0 when absent.
+       * A shadow that reaches the next row draws fainter.
        */
       shadow?: {
           x?: number;
@@ -16625,8 +16766,10 @@ declare module 'claude-code' {
        * once, and the edges and middle stretch, or tile with `repeat`. One inset for
        * every side, or top, right, bottom and left, in `viewBox` units: a point each
        * unless `size` scales them, and 48 points at most. The drawing is then the
-       * box's whole shape, so `shadow` follows it, and `backgroundColor`, `radius`
-       * and the border aren't painted.
+       * box's whole shape, so `shadow` follows it, and `radius` and the border
+       * aren't painted. `backgroundColor` is painted only when the words are under
+       * 3:1 on a color of the drawing or on what lies behind it: then it goes over
+       * the drawing, under the words alone.
        */
       slice?: number | readonly [number, number, number, number];
   }
@@ -16750,7 +16893,8 @@ declare module 'claude-code' {
    */
   export interface ThemeMessageRule extends ThemeTypeRule, ThemeBoxRule {
       /**
-       * Tilts the box clockwise: -3 to 3 degrees. A large box tilts less.
+       * Tilts the box clockwise: -3 to 3 degrees. A large box tilts less, and one
+       * in a view laid out as a chat feed doesn't tilt.
        */
       rotate?: number;
   }
@@ -16973,10 +17117,13 @@ declare module 'claude-code' {
    * The words stay the app's text, so selecting, copying, finding and screen
    * readers work as they do with no theme. A permission prompt, a question and a
    * code block keep the app's look. A value out of range is refused with what to
-   * change, as is a style of over 1,500 values or 65,536 characters. The mod is
-   * never told whether the style drew. A build that doesn't take `style`, such as
-   * an older one, refuses the whole set, so catch that and set the theme again
-   * without it.
+   * change, as is a style of over 1,500 values or 65,536 characters. A rule whose
+   * words are under 3:1 on what lies behind them, in the mode showing, draws in
+   * the app's own colors, and the other rules still draw. Every color of a `fill`
+   * counts as behind them. Over a backdrop any color can be behind them, so a
+   * text color needs an opaque enough fill under it. The mod is never told
+   * whether the style drew. A build that doesn't take `style`, such as an older
+   * one, refuses the whole set, so catch that and set the theme again without it.
    *
    * @example
    * await $.theme.set({
@@ -17085,6 +17232,9 @@ declare module 'claude-code' {
    * words.
    */
   export interface ThemeToolRule extends ThemeBoxRule {
+      /**
+       * Over a backdrop, this draws only on an opaque enough fill.
+       */
       color?: ThemeStyleColor;
       fontFamily?: readonly [ThemeGenericFont];
   }
@@ -17094,10 +17244,13 @@ declare module 'claude-code' {
    * out keeps the app's own value.
    */
   export interface ThemeTypeRule {
+      /**
+       * Over a backdrop, this draws only on an opaque enough fill.
+       */
       color?: ThemeStyleColor;
       /**
-       * A list of one generic font, such as `["serif"]`. A font the person chose in
-       * the app's settings wins.
+       * A list of one generic font, such as `["serif"]`. The person's accessibility
+       * settings win (a font, higher contrast), and the app tells them so.
        */
       fontFamily?: readonly [ThemeGenericFont];
       /**
@@ -18708,22 +18861,24 @@ declare module 'claude-code' {
       isCopied: true;
   } | {
       /**
-       * False: nothing was copied.
+       * False: nothing was copied, or with `unanswered` nothing says it was.
        */
       isCopied: false;
       /**
-       * Why not, a closed set: `no-surface`, `no-clipboard` or `refused`; a
-       * hook above answering without copying says `refused`.
+       * Why not, a closed set: `no-surface`, `no-clipboard`, `unanswered` or
+       * `refused`; a hook above answering without copying says `refused`.
        *
        * `no-surface`: nothing draws (a `-p` run, the SDK), or the named
        * surface is not attached. `no-clipboard`: it draws but nothing was
        * written (no clipboard tool ran and OSC 52 was past its bound or left
-       * out, as for VTE before 0.53; a remote app declined or was silent).
+       * out, as for VTE before 0.53; a remote app declined or was not asked).
+       * `unanswered`: a remote app was asked and none answered, so the copy
+       * may have landed. A hook's `{ value }` passes up as the hook wrote it.
        *
        * @example
        * on('ui.copy', { surface: 'mobile' }, () => ({ value: REFUSED }))
        */
-      reason: 'no-surface' | 'no-clipboard' | 'refused';
+      reason: 'no-surface' | 'no-clipboard' | 'unanswered' | 'refused';
   };
 
   /**
@@ -19780,6 +19935,145 @@ declare module 'claude-code' {
   } | {
       deny: string;
       value?: undefined;
+  };
+
+  /**
+   * The input of `vcs.detect`: the folder asked about.
+   */
+  export type VcsDetectInput = {
+      /**
+       * The folder, absolute; pinned, so no hook passes another down.
+       */
+      path: string;
+  };
+
+  /**
+   * What a `vcs.detect` hook returns: the working copy the folder is in, or
+   * null when it is in none.
+   */
+  export type VcsDetectResult = VcsWorkingCopy | null;
+
+  /**
+   * One changed file of a `vcs.diff` answer. Its names are data to show, each
+   * of at most 4096 characters.
+   */
+  export type VcsDiffFile = {
+      /**
+       * The file, relative to the copy's `root`, with `/`; listed once.
+       */
+      path: string;
+      /**
+       * Its name at the base where it was renamed, else null.
+       */
+      renamedFrom: string | null;
+      /**
+       * The lines added; 0 where they are not counted.
+       */
+      added: number;
+      /**
+       * The lines removed; 0 where they are not counted.
+       */
+      removed: number;
+      isBinary: boolean;
+      /**
+       * On disk, and neither known to the system nor ignored by it.
+       */
+      isUntracked: boolean;
+      /**
+       * Unified hunks from the first `@@`, with no system's file headers; absent
+       * where there are none to give.
+       */
+      patch?: string;
+  };
+
+  /**
+   * The input of `vcs.diff`; every key is pinned, so no hook passes another down.
+   */
+  export type VcsDiffInput = {
+      /**
+       * A folder of the working copy, absolute.
+       */
+      path: string;
+      /**
+       * The system `vcs.detect` names there.
+       */
+      vcs: string;
+      /**
+       * What the files on disk are compared with: `head` is what is checked out,
+       * `default` is where this work left the mainline.
+       */
+      base: 'head' | 'default';
+      /**
+       * The files or folders to keep, relative to the copy's `root`, with `/`;
+       * either name keeps a renamed file. Absent, the whole copy; empty, none.
+       */
+      paths?: readonly string[];
+      /**
+       * True leaves every `patch` out.
+       */
+      isStatOnly?: boolean;
+  };
+
+  /**
+   * What a `vcs.diff` hook returns: the changed files and `base`, a label to
+   * show for what they were compared with, or why they are `unknown`. A null
+   * `unknown` is core's: no hook answered.
+   */
+  export type VcsDiffResult = {
+      base: string;
+      files: readonly VcsDiffFile[];
+      unknown?: undefined;
+  } | {
+      unknown: string | null;
+      base?: undefined;
+      files?: undefined;
+  };
+
+  /**
+   * One working copy, as `vcs.detect` answers it: which system keeps it, where
+   * it lies, and where it stands now.
+   *
+   * `revision`, `branch`, `defaultBranch` and `remote` are the system's own
+   * words, one line each but `branch`: handed on as given, never run or parsed
+   * as another system's.
+   */
+  export type VcsWorkingCopy = {
+      /**
+       * The system, a short lowercase slug (`acme`); core says `git`.
+       *
+       * Any slug but `git` and core's own for the folder drops the Git status
+       * block and commit steps. It carries no other privilege.
+       */
+      vcs: string;
+      /**
+       * The working copy's root, absolute: `path` or a folder above it, as
+       * spelled or once its links are followed.
+       */
+      root: string;
+      /**
+       * The repository's main copy, absolute; `root` where it has no other. Null
+       * where it is not known: readers then take `root`.
+       */
+      mainRoot: string | null;
+      /**
+       * What is checked out (a number, a range, a change id), or null.
+       */
+      revision: string | null;
+      /**
+       * The line of work the copy is on, or null where it is on none. The model
+       * is told it beside the system, unless it is over 200 characters or holds
+       * a control, invisible or line-break character, `<` or `>`.
+       */
+      branch: string | null;
+      /**
+       * The line of work changes land on, or null where none is known.
+       */
+      defaultBranch: string | null;
+      /**
+       * Where the repository is served from, a URL or not (`ssl:host:1666`), or
+       * null. The engine takes off whatever may be a credential.
+       */
+      remote: string | null;
   };
 
   /**
