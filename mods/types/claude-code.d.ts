@@ -3068,7 +3068,8 @@ declare module 'claude-code' {
            * instances this plugin may draw again; the others drop the cached answers.
            *
            * A redraw: ten a second at most, thirty in the terminal for a shown pane,
-           * expanded band and prompt hint (sooner calls fold). A cached answer drops
+           * expanded band and prompt hint (sooner calls fold), down to one in five
+           * seconds for the rows of a long terminal scrollback. A cached answer drops
            * next turn; a changed tool or section text then waits, as
            * `breakPromptCache` on its answer tells.
            *
@@ -3387,8 +3388,9 @@ declare module 'claude-code' {
            * switch from the tasks list does; `{}` goes back to the main one.
            *
            * Only while the call answers the person's own input (a press, a pick,
-           * their prompt or command): the viewed agent takes the prompt's next
-           * Enter. A site reads the view in force as `e.props.view`.
+           * their prompt or command). On the terminal the viewed agent takes the
+           * prompt's next Enter, and a site reads the view as `e.props.view`. In an
+           * app that switches views, only a Button's press moves its window.
            *
            * @param view `agentId`: the agent's `id` in `$.agent.list()`; absent for
            *             the main conversation
@@ -3568,6 +3570,11 @@ declare module 'claude-code' {
            * `{ asset }` is the plugin's own file; `afplay` plays it on macOS, and a
            * Linux or Windows terminal, having no player, plays nothing. Resolves once
            * played or skipped; rejects, naming the cause, when the clip cannot play.
+           *
+           * Where an app that supports it shows a cloud, Linux or Windows session, the
+           * app may be handed the clip, which must then be a PCM WAV of at most 1 MiB.
+           * Heard or not, it resolves at the clip's length (a loop, at its abort) or
+           * when the last such app leaves.
            *
            * @param clip the plugin's own file (`{ asset }`), a URL the engine
            *   fetches, or the bytes as base64 with their MIME type
@@ -6584,7 +6591,11 @@ declare module 'claude-code' {
        * rewrite; the model and the transcript file never read that form.
        *
        * @example
-       * on("session.append", { door: "tool-result" }, ($, e, n) => n(scrub(e)))
+       * // a file the engine attaches by itself comes by the door `attachment`
+       * on("session.append", { door: ["tool-result", "attachment"] }, ($, e, n) =>
+       *   n(scrub(e)))
+       * // a compaction typed in the terminal skips that door: mask the request too
+       * on("prompt.attachment", ($, e, n) => n({ ...e, text: redact(e.text) }))
        */
       'session.append': SessionAppendInput;
       /**
@@ -11846,6 +11857,45 @@ declare module 'claude-code' {
        */
       hosts: PluginHosts | null;
       /**
+       * What the parts in `provides` run or start with, each under its part's name.
+       * Text is as written, less provider tokens; `env` holds names, never values.
+       * Null wherever `provides` is, or where a list could be short. A report from
+       * an older CLI leaves it out.
+       */
+      runs: {
+          mcpServerEnv: readonly {
+              name: string;
+              env: readonly string[];
+          }[];
+          mcpHeadersHelpers: readonly {
+              name: string;
+              command: string;
+          }[];
+          lspServerEnv: readonly {
+              name: string;
+              env: readonly string[];
+          }[];
+          skillHooks: readonly {
+              name: string;
+              hook: PluginHookEntry;
+          }[];
+          /** The `!` commands in a skill's or command's text. */
+          inlineShell: readonly {
+              name: string;
+              command: string;
+          }[];
+          subagentStatusLine: readonly {
+              command: string;
+          }[];
+          /** The values the manifest gives each option a command or such a text names; none for one marked `sensitive` or that only `env` names. */
+          optionDefaults: readonly {
+              name: string;
+              option: string;
+              default?: string | number | boolean | readonly string[];
+              options?: readonly string[];
+          }[];
+      } | null;
+      /**
        * What the validator advises without counting it under any flag: today, the
        * install line a plugin's README lacks.
        */
@@ -15628,6 +15678,8 @@ declare module 'claude-code' {
           };
           /**
            * The text the person has selected, when the menu was opened on it.
+           *
+           * Absent in a cloud session.
            */
           selection?: UiSelection;
           /**
@@ -22815,7 +22867,8 @@ declare module 'claude-code' {
        *
        * The call did not answer the person's own input; no agent holds the id,
        * or the tasks list shows none for it; a teammate was stopped, or runs in
-       * a pane of its own; the view moved meanwhile; the session draws none.
+       * a pane of its own; the view moved meanwhile; the session draws none; an
+       * app had no Button pressed in it, did not switch, or did not answer.
        */
       deny?: string;
   };
